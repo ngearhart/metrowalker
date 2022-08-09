@@ -1,11 +1,13 @@
 
+from collections import defaultdict
 import requests
 from typing import List
 import networkx
-from functools import cached_property
+from functools import cached_property, cache
 from matplotlib import pyplot
+from pprint import pprint
 
-from data import Line, MetroPathItem, Station
+from data import Line, MetroPathItem, Station, StationToStationInfo
 
 COLORS = {
     'RD': '#f44336',
@@ -16,6 +18,14 @@ COLORS = {
     'SV': '#bcbcbc'
 }
 
+STATION_TRANSFER_PENALTY_MINUTES = 10
+
+
+@cache
+def get_api_key():
+    with open('api_key.txt', 'r') as file:
+        return file.readlines()[0]
+
 
 class MetroGraph(networkx.Graph):
 
@@ -24,7 +34,7 @@ class MetroGraph(networkx.Graph):
         response = requests.get(
             'https://api.wmata.com/Rail.svc/json/jStations',
             headers={
-                'api_key': '7a74e104f95940c7b4dc8afdb466fd61'
+                'api_key': get_api_key()
             }
         ).json()
         self.station_list = Station.schema().load(response['Stations'], many=True)
@@ -39,32 +49,49 @@ class MetroGraph(networkx.Graph):
         response = requests.get(
             'https://api.wmata.com/Rail.svc/json/jLines',
             headers={
-                'api_key': '7a74e104f95940c7b4dc8afdb466fd61'
+                'api_key': get_api_key()
             }
         ).json()
         self.line_list = Line.schema().load(response['Lines'], many=True)
+
+        # Retrieve estimated time to go between stations (for weights)
+        weights = self._build_weights()
         for line in self.line_list:
-            self._traverse_line(line)
-        # Add edge of weight 0 between stations that are the same
+            self._traverse_line(line, weights)
+        # Add edge of small weight between stations that are the same
         for station in self.station_list:
-            if station.station_together1 is not None:
+            if station.station_together1 is not None and len(station.station_together1) > 0:
                 self.add_edge(
                     station.code,
                     station.station_together1,
-                    weight=0
+                    weight=STATION_TRANSFER_PENALTY_MINUTES # Incur a small cost to switch platforms
                 )
-            if station.station_together2 is not None:
+            if station.station_together2 is not None  and len(station.station_together2) > 0:
                 self.add_edge(
                     station.code,
                     station.station_together2,
-                    weight=0
+                    weight=STATION_TRANSFER_PENALTY_MINUTES
                 )
 
-    def _traverse_line(self, line: Line):
+    def _build_weights(self) -> dict:
+        response = requests.get(
+            'https://api.wmata.com/Rail.svc/json/jSrcStationToDstStationInfo',
+            headers={
+                'api_key': get_api_key()
+            }
+        ).json()
+        self.station_to_station_list = StationToStationInfo.schema().load(response['StationToStationInfos'], many=True)
+        result = defaultdict(dict)
+        for station_info in self.station_to_station_list:
+            result[station_info.source_station][station_info.destination_station] = station_info.rail_time
+            result[station_info.destination_station][station_info.source_station] = station_info.rail_time
+        return result
+
+    def _traverse_line(self, line: Line, weights: dict):
         response = requests.get(
             f'https://api.wmata.com/Rail.svc/json/jPath?FromStationCode={line.start_station_code}&ToStationCode={line.end_station_code}',
             headers={
-                'api_key': '7a74e104f95940c7b4dc8afdb466fd61'
+                'api_key': get_api_key()
             }
         ).json()
         path = MetroPathItem.schema().load(response['Path'], many=True)
@@ -73,7 +100,8 @@ class MetroGraph(networkx.Graph):
             self.add_edge(
                 previous_station.station_code,
                 next_station.station_code,
-                weight=next_station.distance_to_prev
+                weight=weights[previous_station.station_code][next_station.station_code]
+                # weight=next_station.distance_to_prev
             )
             previous_station = next_station
 
@@ -94,9 +122,13 @@ class MetroGraph(networkx.Graph):
         pyplot.show()
 
     def traveling_salesman(self):
-        result = networkx.approximation.traveling_salesman_problem(self, cycle=False)
-        return result
-        # return [self.get_station(station).name for station in result]
+        return networkx.approximation.traveling_salesman_problem(self, cycle=False)
 
 g = MetroGraph()
-print(g.traveling_salesman())
+result = g.traveling_salesman()
+print('Result:')
+pprint([g.get_station(station).name for station in result if len(station) > 0], width=80, compact=True)
+
+total_minutes = networkx.path_weight(g, result, weight="weight")
+print(f'Total minutes: {total_minutes} = {total_minutes / 60} hours')
+# g.show()

@@ -32,3 +32,12 @@ class MetroPathItem:
     seq_num: int
     station_code: str
     station_name: str
+
+
+@dataclass_json(letter_case=LetterCase.PASCAL, undefined=Undefined.EXCLUDE)
+@dataclass
+class StationToStationInfo:
+    composite_miles: float
+    source_station: str
+    destination_station: str
+    rail_time: int  # minutes
